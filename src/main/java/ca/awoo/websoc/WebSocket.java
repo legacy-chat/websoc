@@ -49,8 +49,17 @@ public class WebSocket extends Socket {
         }
     }
 
-    public WebSocket(URI uri) throws IOException, ParseException, NoSuchAlgorithmException{
-        Connection con = connect(uri);
+    public WebSocket(URI uri) throws WebSocketException{
+        Connection con;
+        try {
+            con = connect(uri);
+        } catch (NoSuchAlgorithmException e) {
+            throw new WebSocketException("No SHA-1 algorithm", e);
+        } catch (IOException e) {
+            throw new WebSocketException("IO error", e);
+        } catch (ParseException e) {
+            throw new WebSocketException("Parse error", e);
+        }
         this.uri = con.uri;
         this.socket = con.socket;
     }
