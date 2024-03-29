@@ -12,6 +12,8 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -20,6 +22,7 @@ import java.util.Map;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 
+import ca.awoo.fwoabl.Base64;
 import ca.awoo.fwoabl.function.Function;
 import ca.awoo.praser.Context;
 import ca.awoo.praser.ParseException;
@@ -43,13 +46,13 @@ public class WebSocket extends Socket {
         }
     }
 
-    public WebSocket(URI uri) throws IOException, ParseException{
+    public WebSocket(URI uri) throws IOException, ParseException, NoSuchAlgorithmException{
         Connection con = connect(uri);
         this.uri = con.uri;
         this.socket = con.socket;
     }
 
-    private Connection connect(URI uri) throws IOException, ParseException{
+    private Connection connect(URI uri) throws IOException, ParseException, NoSuchAlgorithmException{
         if(uri.getScheme().equals("http")){
             try {
                 uri = new URI("ws", uri.getUserInfo(), uri.getHost(), uri.getPort(), uri.getPath(), uri.getQuery(), uri.getFragment());
@@ -94,8 +97,17 @@ public class WebSocket extends Socket {
             throw new IllegalArgumentException("Invalid scheme: " + uri.getScheme());
         }
         Connection connection = new Connection(socket, uri);
-        sendHandshake("dGhlIHNhbXBsZSBub25jZQ==", connection);
-        Connection finalConnection = receiveHandshake("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", connection);
+        byte[] key = new byte[16];
+        for(int i = 0; i < 16; i++){
+            //TODO: I don't think Math.random() is on the ietf's list of suitably high-entropy random sources
+            key[i] = (byte)(Math.random() * 256);
+        }
+        String keyString = Base64.getEncoder().encode(key);
+        String responseString = keyString + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+        byte[] sha1 = MessageDigest.getInstance("SHA-1").digest(responseString.getBytes("UTF-8"));
+        String accept = Base64.getEncoder().encode(sha1);
+        sendHandshake(keyString, connection);
+        Connection finalConnection = receiveHandshake(accept, connection);
         return finalConnection;
     }
 
@@ -126,7 +138,7 @@ public class WebSocket extends Socket {
     }
 
     @SuppressWarnings("unchecked")
-    private Connection receiveHandshake(String expectedKey, Connection con) throws IOException, ParseException{
+    private Connection receiveHandshake(String expectedKey, Connection con) throws IOException, ParseException, NoSuchAlgorithmException{
         //Parse http response
         Context<Character> context = contextFromStream(con.socket.getInputStream(), Charset.forName("UTF-8"));
         tag("HTTP/1.1 ").parse(context);

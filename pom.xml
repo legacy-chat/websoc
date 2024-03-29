@@ -30,6 +30,11 @@ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xs
 	    <artifactId>praser</artifactId>
 	    <version>200199b672</version>
 	</dependency>
+    <dependency>
+	    <groupId>com.github.legacy-chat</groupId>
+	    <artifactId>fwoabl</artifactId>
+	    <version>trunk-SNAPSHOT</version>
+	</dependency>
 </dependencies>
 
 <reporting>
