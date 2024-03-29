@@ -9,10 +9,13 @@ import java.net.Socket;
 import java.net.SocketAddress;
 import java.net.SocketException;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
@@ -30,8 +33,39 @@ public class WebSocket extends Socket {
     private final Socket socket;
     private final URI uri;
 
+    private static class Connection{
+        public final Socket socket;
+        public final URI uri;
+
+        public Connection(Socket socket, URI uri){
+            this.socket = socket;
+            this.uri = uri;
+        }
+    }
+
     public WebSocket(URI uri) throws IOException, ParseException{
-        this.uri = uri;
+        Connection con = connect(uri);
+        this.uri = con.uri;
+        this.socket = con.socket;
+    }
+
+    private Connection connect(URI uri) throws IOException, ParseException{
+        if(uri.getScheme().equals("http")){
+            try {
+                uri = new URI("ws", uri.getUserInfo(), uri.getHost(), uri.getPort(), uri.getPath(), uri.getQuery(), uri.getFragment());
+            } catch (URISyntaxException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        if(uri.getScheme().equals("https")){
+            try {
+                uri = new URI("wss", uri.getUserInfo(), uri.getHost(), uri.getPort(), uri.getPath(), uri.getQuery(), uri.getFragment());
+            } catch (URISyntaxException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        System.out.println("Connecting to: " + uri);
+        Socket socket;
         if(uri.getScheme().equals("wss")){
             try {
                 int port = uri.getPort();
@@ -59,33 +93,26 @@ public class WebSocket extends Socket {
         }else{
             throw new IllegalArgumentException("Invalid scheme: " + uri.getScheme());
         }
-        sendHandshake("dGhlIHNhbXBsZSBub25jZQ==");
-        receiveHandshake("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        Connection connection = new Connection(socket, uri);
+        sendHandshake("dGhlIHNhbXBsZSBub25jZQ==", connection);
+        Connection finalConnection = receiveHandshake("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", connection);
+        return finalConnection;
     }
 
-    private void sendHandshake(String key) throws IOException{
-        PrintStream out = new PrintStream(socket.getOutputStream(), true, "UTF-8");
-        String path = uri.getPath();
+    private void sendHandshake(String key, Connection con) throws IOException{
+        PrintStream out = new PrintStream(con.socket.getOutputStream(), true, "UTF-8");
+        String path = con.uri.getPath();
         if(path.length() == 0){
             path = "/";
         }
         out.println("GET " + path + " HTTP/1.1");
-        out.println("Host: " + uri.getHost());
-        out.println("Origin: " + "https://" + uri.getHost() + "/");//TODO: handle origin better
+        out.println("Host: " + con.uri.getHost());
+        out.println("Origin: " + "https://" + con.uri.getHost() + "/");//TODO: handle origin better
         out.println("Upgrade: websocket");
         out.println("Connection: Upgrade");
         out.println("Sec-WebSocket-Key: " + key);
         out.println("Sec-WebSocket-Version: 13");
         out.println();
-
-        System.out.println("GET " + path + " HTTP/1.1");
-        System.out.println("Host: " + uri.getHost());
-        System.out.println("Origin: https://" + uri.getHost() + "/");//TODO: handle origin better
-        System.out.println("Upgrade: websocket");
-        System.out.println("Connection: Upgrade");
-        System.out.println("Sec-WebSocket-Key: " + key);
-        System.out.println("Sec-WebSocket-Version: 13");
-        System.out.println();
     }
 
     private static class Header{
@@ -99,9 +126,13 @@ public class WebSocket extends Socket {
     }
 
     @SuppressWarnings("unchecked")
-    private void receiveHandshake(String expectedKey) throws IOException, ParseException{
-        Context<Character> context = contextFromStream(socket.getInputStream(), Charset.forName("UTF-8"));
-        tag("HTTP/1.1 101 Switching Protocols\r\n").parse(context);
+    private Connection receiveHandshake(String expectedKey, Connection con) throws IOException, ParseException{
+        //Parse http response
+        Context<Character> context = contextFromStream(con.socket.getInputStream(), Charset.forName("UTF-8"));
+        tag("HTTP/1.1 ").parse(context);
+        int code = integer().parse(context);
+        String message = stringFold(many(not(one('\r')))).parse(context);
+        tag("\r\n").parse(context);
         Parser<Character, String> headerName = stringFold(oneOrMore(or(letter(), oneOf("-"))));
         Parser<Character, Character> printable = oneOf(" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~");
         Parser<Character, String> headerValue = stringFold(oneOrMore(printable));
@@ -112,31 +143,42 @@ public class WebSocket extends Socket {
         });
         Parser<Character, List<Header>> headers = many(header);
         List<Header> headerList = headers.parse(context);
-        boolean upgrade = false;
-        boolean connection = false;
-        boolean accept = false;
-        System.out.println("Headers: " + headerList.size());
+        Map<String, String> headerMap = new HashMap<String, String>();
         for(Header h : headerList){
-            System.out.println("Header: " + h.name + ": " + h.value);
-            if(h.name.equalsIgnoreCase("Upgrade")){
-                if(h.value.equalsIgnoreCase("websocket")){
-                    upgrade = true;
-                }
-            }else if(h.name.equalsIgnoreCase("Connection")){
-                if(h.value.equalsIgnoreCase("Upgrade")){
-                    connection = true;
-                }
-            }else if(h.name.equalsIgnoreCase("Sec-WebSocket-Accept")){
-                System.out.println("Sec-WebSocket-Accept: " + h.value + " (expected: " + expectedKey + ")");
-                if(h.value.equals(expectedKey)){
-                    accept = true;
-                }
-            }
+            headerMap.put(h.name.toLowerCase(), h.value);
         }
+
+        if(code >= 300 && code <= 399){
+            //Redirect
+            String location = headerMap.get("location");
+            if(location == null){
+                System.out.println("HTTP/1.1 " + code + " " + message);
+                for(Header h : headerList){
+                    System.out.println(h.name + ": " + h.value);
+                }
+                throw new IOException("Redirect without location header");
+            }
+            URI newUri;
+            try {
+                newUri = new URI(location);
+            } catch (URISyntaxException e) {
+                throw new IOException("Invalid redirect location: " + location);
+            }
+            System.out.println("Redirecting to: " + location);
+            return connect(newUri);
+        }
+        if(code != 101){
+            throw new IOException("Invalid response code: " + code + " " + message);
+        }
+
+        boolean upgrade = "websocket".equalsIgnoreCase(headerMap.get("upgrade"));
+        boolean connection = "upgrade".equalsIgnoreCase(headerMap.get("connection"));
+        boolean accept = expectedKey.equals(headerMap.get("sec-websocket-accept"));
         if(!upgrade || !connection || !accept){
             throw new IOException("Invalid handshake");
         }
         tag("\r\n").parse(context);
+        return con;
     }
 
     private static class Frame {
@@ -321,7 +363,7 @@ public class WebSocket extends Socket {
             for(int i = 0; i < len; i++){
                 data[i] = bytes[off + i];
             }
-            Frame frame = new Frame(true, 1, true, len, mask, data);
+            Frame frame = new Frame(true, 2, true, len, mask, data);
             System.out.println("Write: " + frame);
             frame.write(os);
         }
