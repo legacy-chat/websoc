@@ -16,13 +16,16 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 
 import ca.awoo.fwoabl.Base64;
+import ca.awoo.fwoabl.function.Consumer;
 import ca.awoo.fwoabl.function.Function;
 import ca.awoo.praser.Context;
 import ca.awoo.praser.ParseException;
@@ -67,7 +70,6 @@ public class WebSocket extends Socket {
                 throw new RuntimeException(e);
             }
         }
-        System.out.println("Connecting to: " + uri);
         Socket socket;
         if(uri.getScheme().equals("wss")){
             try {
@@ -103,6 +105,7 @@ public class WebSocket extends Socket {
             key[i] = (byte)(Math.random() * 256);
         }
         String keyString = Base64.getEncoder().encode(key);
+        //This magic UUID is defined in the spec
         String responseString = keyString + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
         byte[] sha1 = MessageDigest.getInstance("SHA-1").digest(responseString.getBytes("UTF-8"));
         String accept = Base64.getEncoder().encode(sha1);
@@ -164,10 +167,6 @@ public class WebSocket extends Socket {
             //Redirect
             String location = headerMap.get("location");
             if(location == null){
-                System.out.println("HTTP/1.1 " + code + " " + message);
-                for(Header h : headerList){
-                    System.out.println(h.name + ": " + h.value);
-                }
                 throw new IOException("Redirect without location header");
             }
             URI newUri;
@@ -176,7 +175,6 @@ public class WebSocket extends Socket {
             } catch (URISyntaxException e) {
                 throw new IOException("Invalid redirect location: " + location);
             }
-            System.out.println("Redirecting to: " + location);
             return connect(newUri);
         }
         if(code != 101){
@@ -193,7 +191,7 @@ public class WebSocket extends Socket {
         return con;
     }
 
-    private static class Frame {
+    public static class Frame {
         private final boolean fin;
         private final int opcode;
         private final boolean masked;
@@ -294,23 +292,75 @@ public class WebSocket extends Socket {
         }
     }
 
+    private final Set<Consumer<Frame>> readListeners = new HashSet<Consumer<Frame>>();
+
+    /**
+     * Read a frame from the WebSocket. This method will block until a frame is read.
+     * <p>
+     * This method will also fire any listeners that have been added with onReadFrame.
+     * </p>
+     * <p>
+     * Be careful using this with getInputStream, as reading frames with readFrame will stop them from getting read by the InputStream.
+     * </p>
+     * @return the frame read from the websocket
+     * @throws IOException if there was a problem reading the frame.
+     */
     public Frame readFrame() throws IOException {
-        return Frame.read(socket.getInputStream());
+        Frame frame = Frame.read(socket.getInputStream());
+        for(Consumer<Frame> listener : readListeners){
+            listener.invoke(frame);
+        }
+        return frame;
     }
 
+    /**
+     * Add a listener to be fired every time a frame is read. This mostly exists for debugging purposes.
+     * <p>
+     * Frames will still only be read when a call to readFrame() is made or data is read from the InputStream.
+     * </p>
+     * @param listener A listener to call with the read frame
+     * @see readFrame
+     * @see getInputStream
+     */
+    public void onReadFrame(Consumer<Frame> listener){
+        readListeners.add(listener);
+    }
+
+    private final Set<Consumer<Frame>> writeListeners = new HashSet<Consumer<Frame>>();
+
+    /**
+     * Write a frame to the WebSocket.
+     * <p>
+     * This method will also fire any listeners that have been added with onWriteFrame.
+     * </p>
+     * @param frame the frame to write
+     * @throws IOException if there was a problem writing the frame.
+     */
     public void writeFrame(Frame frame) throws IOException {
+        for(Consumer<Frame> listener : writeListeners){
+            listener.invoke(frame);
+        }
         frame.write(socket.getOutputStream());
+    }
+
+    /**
+     * Add a listener to be fired every time a frame is written. This mostly exists for debugging purposes.
+     * @param listener A listener to call with the written frame
+     * @see writeFrame
+     * @see getOutputStream
+     */
+    public void onWriteFrame(Consumer<Frame> listener){
+        writeListeners.add(listener);
     }
 
     private class WebSocketInputStream extends InputStream {
 
         List<Byte> buffer = new ArrayList<Byte>();
 
-        private int readFrame(InputStream is) throws IOException{
+        private int readFrame() throws IOException{
             Frame frame;
             do{
-                frame = Frame.read(is);
-                System.out.println("Read: " + frame);
+                frame = WebSocket.this.readFrame();
                 if(frame.opcode == 8){
                     return -1;
                 }
@@ -328,9 +378,8 @@ public class WebSocket extends Socket {
 
         @Override
         public int read() throws IOException {
-            InputStream is = socket.getInputStream();
             while (buffer.isEmpty()){
-                int result = readFrame(is);
+                int result = readFrame();
                 if(result == -1){
                     if(buffer.isEmpty()){
                         return -1;
@@ -348,7 +397,7 @@ public class WebSocket extends Socket {
         @Override
         public int read(byte[] b, int off, int len) throws IOException {
             if(buffer.isEmpty()){
-                int result = readFrame(socket.getInputStream());
+                int result = readFrame();
                 if(result == -1){
                     return -1;
                 }
@@ -366,7 +415,7 @@ public class WebSocket extends Socket {
 
     private class WebSocketOutputStream extends OutputStream {
 
-        private void writeFrame(byte[] bytes, int off, long len, OutputStream os) throws IOException {
+        private void writeFrame(byte[] bytes, int off, long len) throws IOException {
             byte[] mask = new byte[4];
             for(int i = 0; i < 4; i++){
                 mask[i] = (byte)(Math.random() * 256);
@@ -376,25 +425,24 @@ public class WebSocket extends Socket {
                 data[i] = bytes[off + i];
             }
             Frame frame = new Frame(true, 2, true, len, mask, data);
-            System.out.println("Write: " + frame);
-            frame.write(os);
+            WebSocket.this.writeFrame(frame);
         }
 
         @Override
         public void write(int b) throws IOException {
             byte[] bytes = new byte[1];
             bytes[0] = (byte)b;
-            writeFrame(bytes, 0, 1, socket.getOutputStream());
+            writeFrame(bytes, 0, 1);
         }
 
         @Override
         public void write(byte[] b) throws IOException {
-            writeFrame(b, 0, b.length, socket.getOutputStream());
+            writeFrame(b, 0, b.length);
         }
 
         @Override
         public void write(byte[] b, int off, int len) throws IOException {
-            writeFrame(b, off, len, socket.getOutputStream());
+            writeFrame(b, off, len);
         }
 
         
