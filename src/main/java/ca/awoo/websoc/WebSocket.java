@@ -234,7 +234,10 @@ public class WebSocket extends Socket {
                 is.read(maskKey);
             }
             byte[] data = new byte[length];
-            is.read(data);
+            int soFar = 0;
+            while(soFar < length){
+                soFar += is.read(data, soFar, length - soFar);
+            }
             for(int i = 0; i < data.length; i++){
                 data[i] ^= maskKey[i % 4];
             }
